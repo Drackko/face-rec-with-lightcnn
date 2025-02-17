@@ -1,0 +1,6 @@
+.idea/
+data/dataset_1/
+data/dataset_1_grayscale/
+checkpoints/LightCNN_29Layers_V2_checkpoint.pth.tar
+/data/dataset_1/
+/data/
