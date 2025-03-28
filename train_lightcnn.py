@@ -14,13 +14,21 @@ class FaceDataset(Dataset):
         self.transform = transform
         self.image_paths = []
         self.labels = []
-        self.class_to_idx = {person: i for i, person in enumerate(os.listdir(root_dir))}
-
+        
+        # Create class mapping
+        self.class_to_idx = {}
+        for idx, person in enumerate(sorted(os.listdir(root_dir))):
+            if os.path.isdir(os.path.join(root_dir, person)):
+                self.class_to_idx[person] = idx
+        
+        # Now collect images and labels
         for person in os.listdir(root_dir):
             person_dir = os.path.join(root_dir, person)
-            for img_name in os.listdir(person_dir):
-                self.image_paths.append(os.path.join(person_dir, img_name))
-                self.labels.append(self.class_to_idx[person])
+            if os.path.isdir(person_dir):
+                for img_name in os.listdir(person_dir):
+                    if img_name.lower().endswith(('.png', '.jpg', '.jpeg')):
+                        self.image_paths.append(os.path.join(person_dir, img_name))
+                        self.labels.append(self.class_to_idx[person])
 
     def __len__(self):
         return len(self.image_paths)
@@ -39,7 +47,7 @@ transform = transforms.Compose([
 ])
 
 # Load dataset
-train_dataset = FaceDataset(root_dir="/mnt/nvme0n1p4/PROJECTS/face-recognition/data/dataset_1_grayscale", transform=transform)
+train_dataset = FaceDataset(root_dir="data_processed", transform=transform)
 train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
 
 # Model setup
@@ -52,7 +60,7 @@ model = LightCNN_29Layers_v2(num_classes=num_classes)
 model = model.to(device)
 
 # Load Pretrained Weights (Checkpoint)
-checkpoint_path = "/mnt/nvme0n1p4/PROJECTS/face-recognition/checkpoints/LightCNN_29Layers_V2_checkpoint.pth.tar"
+checkpoint_path = "checkpoints/LightCNN_29Layers_V2_checkpoint.pth.tar"
 
 if os.path.exists(checkpoint_path):
     try:
@@ -99,4 +107,4 @@ for epoch in range(epochs):
     print(f"Epoch {epoch+1}/{epochs}, Loss: {running_loss/len(train_loader)}")
 
 # Save trained model
-torch.save(model.state_dict(), "lightcnn_face_recognizer.pth")
+torch.save(model.state_dict(), "lcnnSiddSai.pth")
