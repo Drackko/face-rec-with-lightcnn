@@ -7,7 +7,7 @@ checkpoints/LightCNN_29Layers_V2_checkpoint.pth.tar
 StudentDataset-ML_A/data
 data_processed/
 base_dataset/video
+base_dataset/raw_faces
 test_images
 test_images/op
-
 lcnnSiddSai.pth
