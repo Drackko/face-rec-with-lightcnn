@@ -5,7 +5,7 @@ import numpy as np
 from ultralytics import YOLO
 import argparse
 
-def detect_and_save_faces(video_path, output_dir="/mnt/data/PROJECTS/face-rec-lightcnn/base_dataset/raw_faces", 
+def detect_and_save_faces(video_path, output_dir="/mnt/data/PROJECTS/face-rec-lightcnn/base_dataset/test_faces", 
                          confidence=0.7):
     """
     Detect faces in a video using YOLOv8 and save faces with confidence ≥ 0.7
@@ -108,7 +108,7 @@ def detect_and_save_faces(video_path, output_dir="/mnt/data/PROJECTS/face-rec-li
     print(f"Total faces saved: {faces_saved}")
     print("="*50)
 
-def process_videos(video_dir, output_dir="/mnt/data/PROJECTS/face-rec-lightcnn/base_dataset/raw_faces", 
+def process_videos(video_dir, output_dir="/mnt/data/PROJECTS/face-rec-lightcnn/base_dataset/test_faces", 
                  confidence=0.7):
     """
     Process all video files in a directory
@@ -124,7 +124,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Detect and crop faces from videos")
     parser.add_argument("--video", help="Path to a single video file")
     parser.add_argument("--video_dir", help="Directory containing video files")
-    parser.add_argument("--output", default="/mnt/data/PROJECTS/face-rec-lightcnn/base_dataset/raw_faces", 
+    parser.add_argument("--output", default="/mnt/data/PROJECTS/face-rec-lightcnn/base_dataset/test_faces", 
                         help="Output directory for cropped faces")
     parser.add_argument("--conf", type=float, default=0.7, help="Confidence threshold for detection")
     

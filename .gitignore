@@ -12,3 +12,5 @@ test_images
 test_images/op
 lcnnSiddSai.pth
 /base_dataset
+/venv
+/Finetuning/EDSR_test
