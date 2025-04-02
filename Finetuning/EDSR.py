@@ -207,20 +207,21 @@ class TFModelHandler:
 
 def process_images(input_dir, output_dir=None, model_path=None, scale=4, 
                    min_size=None, recursive=False, suffix="_sr", device=None,
-                   use_fallback=False):
+                   use_fallback=False, target_size=128):
     """
     Process images in a directory using EDSR super-resolution
     
     Args:
         input_dir (str): Directory containing images to process
         output_dir (str): Directory to save processed images (if None, save in same dir)
-        model_path (str): Path to pretrained EDSR model
+        model_path (str): Path to pretrained model (.pth for PyTorch, .pb for TensorFlow)
         scale (int): Super-resolution scale factor
         min_size (int): Only process images smaller than this size (if None, process all)
         recursive (bool): Process images in subdirectories
         suffix (str): Suffix to add to processed image filenames
         device (str): Device to use for processing ('cuda' or 'cpu')
         use_fallback (bool): Use fallback bicubic upscaling instead of model
+        target_size (int): Target size for the output images (default: 128 for face recognition)
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -306,6 +307,10 @@ def process_images(input_dir, output_dir=None, model_path=None, scale=4,
     
     print(f"Found {len(image_files)} images")
     
+    # Calculate input size to achieve target_size after super-resolution
+    base_size = target_size // scale
+    print(f"Using input size of {base_size}x{base_size} to achieve {target_size}x{target_size} after {scale}x upscaling")
+    
     # Process each image
     for img_path in image_files:
         try:
@@ -318,12 +323,33 @@ def process_images(input_dir, output_dir=None, model_path=None, scale=4,
                 print(f"Skipping {img_path} (size: {orig_size})")
                 continue
             
+            # Resize to base_size to ensure consistent output size
+            # First, preserve aspect ratio while making the smallest dimension equal to base_size
+            width, height = img.size
+            if width < height:
+                new_width = base_size
+                new_height = int(height * (base_size / width))
+            else:
+                new_height = base_size
+                new_width = int(width * (base_size / height))
+                
+            # Resize with aspect ratio preserved
+            img_resized = img.resize((new_width, new_height), Image.BICUBIC)
+            
+            # Then center crop to base_size x base_size
+            left = (new_width - base_size) // 2
+            top = (new_height - base_size) // 2
+            right = left + base_size
+            bottom = top + base_size
+            
+            img_cropped = img_resized.crop((left, top, right, bottom))
+            
             # Prepare image for model
             transform = transforms.Compose([
                 transforms.ToTensor(),
                 transforms.Normalize([0.5], [0.5])
             ])
-            input_tensor = transform(img).unsqueeze(0).to(device)
+            input_tensor = transform(img_cropped).unsqueeze(0).to(device)
             
             # Process with model or fallback
             if use_fallback:
@@ -357,6 +383,11 @@ def process_images(input_dir, output_dir=None, model_path=None, scale=4,
             # Convert to PIL image
             output_image = transforms.ToPILImage()(output_tensor)
             
+            # Verify size is target_size x target_size
+            if output_image.size != (target_size, target_size):
+                print(f"Warning: Output size {output_image.size} doesn't match target size ({target_size}x{target_size}). Resizing.")
+                output_image = output_image.resize((target_size, target_size), Image.BICUBIC)
+            
             # Determine output path
             if output_dir:
                 rel_path = os.path.relpath(img_path, input_dir)
@@ -377,12 +408,12 @@ def process_images(input_dir, output_dir=None, model_path=None, scale=4,
             # Save a side-by-side comparison for visual inspection
             if output_dir:
                 comparison_path = os.path.join(output_subdir, f"{filename}_compare{ext}")
-                # Resize original to match SR image size for fair comparison
-                resized_original = img.resize((output_image.width, output_image.height), Image.BICUBIC)
+                # Use original image and upscaled image for comparison
+                original_resized = img.resize((target_size, target_size), Image.BICUBIC)
                 # Create side-by-side image
-                comparison = Image.new('L', (output_image.width * 2, output_image.height))
-                comparison.paste(resized_original, (0, 0))
-                comparison.paste(output_image, (output_image.width, 0))
+                comparison = Image.new('L', (target_size * 2, target_size))
+                comparison.paste(original_resized, (0, 0))
+                comparison.paste(output_image, (target_size, 0))
                 comparison.save(comparison_path)
                 print(f"Saved comparison to {comparison_path}")
             
@@ -404,6 +435,8 @@ if __name__ == "__main__":
     parser.add_argument("--device", type=str, default=None, 
                         help="Device to use for processing (default: cuda if available, else cpu)")
     parser.add_argument("--fallback", action="store_true", help="Use bicubic upscaling instead of model")
+    parser.add_argument("--target-size", type=int, default=128, 
+                        help="Target size for output images (default: 128 for face recognition)")
     
     args = parser.parse_args()
     
@@ -416,5 +449,6 @@ if __name__ == "__main__":
         recursive=args.recursive,
         suffix=args.suffix,
         device=args.device,
-        use_fallback=args.fallback
+        use_fallback=args.fallback,
+        target_size=args.target_size
     )
