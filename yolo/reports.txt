@@ -1,0 +1,67 @@
+==================================================
+FACE DETECTION REPORT FOR: ../base_dataset/video/break2.mp4
+==================================================
+Processed 31766 frames from video
+Total faces detected by YOLO: 296
+Total faces saved: 0
+Total faces rejected: 296
+
+REJECTION BREAKDOWN:
+- Low confidence (below 0.8): 0
+- Too small (below 60px): 281
+- Empty crop: 0
+- No face detected by dlib: 0
+- No landmarks detected: 15
+- Other reasons: 0
+==================================================
+
+==================================================
+FACE DETECTION REPORT FOR: ../base_dataset/video/break2_1.mp4
+==================================================
+Processed 4102 frames from video
+Total faces detected by YOLO: 1
+Total faces saved: 0
+Total faces rejected: 1
+
+REJECTION BREAKDOWN:
+- Low confidence (below 0.8): 0
+- Too small (below 60px): 0
+- Empty crop: 0
+- No face detected by dlib: 0
+- No landmarks detected: 1
+- Other reasons: 0
+==================================================
+
+==================================================
+FACE DETECTION REPORT FOR: ../base_dataset/video/break2_2.mp4
+==================================================
+Processed 2186 frames from video
+Total faces detected by YOLO: 174
+Total faces saved: 0
+Total faces rejected: 174
+
+REJECTION BREAKDOWN:
+- Low confidence (below 0.8): 0
+- Too small (below 60px): 174
+- Empty crop: 0
+- No face detected by dlib: 0
+- No landmarks detected: 0
+- Other reasons: 0
+==================================================
+
+==================================================
+FACE DETECTION REPORT FOR: ../base_dataset/video/break2_2.mp4
+==================================================
+Processed 2186 frames from video
+Total faces detected by YOLO: 174
+Total faces saved: 0
+Total faces rejected: 174
+
+REJECTION BREAKDOWN:
+- Low confidence (below 0.8): 0
+- Too small (below 20px): 2
+- Empty crop: 0
+- No face detected by dlib: 0
+- No landmarks detected: 172
+- Other reasons: 0
+==================================================

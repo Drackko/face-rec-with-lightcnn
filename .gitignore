@@ -11,3 +11,4 @@ base_dataset/raw_faces
 test_images
 test_images/op
 lcnnSiddSai.pth
+/base_dataset
