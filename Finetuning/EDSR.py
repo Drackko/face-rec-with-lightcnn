@@ -7,8 +7,19 @@ import math
 from torchvision import transforms
 import glob
 import numpy as np
+import warnings
+from io import BytesIO
 
-# EDSR Model Definition
+# Try to import TensorFlow
+TF_AVAILABLE = False
+try:
+    import tensorflow as tf
+    print("TensorFlow is available, version:", tf.__version__)
+    TF_AVAILABLE = True
+except ImportError:
+    print("TensorFlow is not available. Only PyTorch models can be used.")
+
+# EDSR Model Definition (PyTorch)
 class MeanShift(nn.Conv2d):
     def __init__(self, rgb_range, rgb_mean, rgb_std, sign=-1):
         super(MeanShift, self).__init__(1, 1, kernel_size=1)
@@ -102,8 +113,101 @@ class EDSR(nn.Module):
 
         return x
 
+# TensorFlow model handler
+class TFModelHandler:
+    def __init__(self, model_path, scale=4):
+        self.model = None
+        self.scale = scale
+        self.load_model(model_path)
+        
+    def load_model(self, model_path):
+        if not TF_AVAILABLE:
+            raise ImportError("TensorFlow is not available. Cannot load .pb model.")
+            
+        try:
+            # Load the TensorFlow model
+            self.model = tf.saved_model.load(model_path)
+            print(f"TensorFlow model loaded from {model_path}")
+            
+            # Try to get the serving function
+            self.infer = self.model.signatures["serving_default"]
+            print("Model input:", self.infer.structured_input_signature)
+            print("Model output:", self.infer.structured_outputs)
+        except Exception as e:
+            # If the above fails, try loading as a frozen graph
+            try:
+                with tf.io.gfile.GFile(model_path, "rb") as f:
+                    graph_def = tf.compat.v1.GraphDef()
+                    graph_def.ParseFromString(f.read())
+                
+                self.graph = tf.Graph()
+                with self.graph.as_default():
+                    tf.import_graph_def(graph_def, name="")
+                
+                self.sess = tf.compat.v1.Session(graph=self.graph)
+                
+                # Find input and output nodes
+                input_nodes = [n.name for n in graph_def.node if "input" in n.name.lower()]
+                output_nodes = [n.name for n in graph_def.node if "output" in n.name.lower()]
+                
+                if input_nodes and output_nodes:
+                    self.input_node = input_nodes[0]
+                    self.output_node = output_nodes[0]
+                    print(f"Model input node: {self.input_node}")
+                    print(f"Model output node: {self.output_node}")
+                else:
+                    print("Could not identify input/output nodes. Using default names.")
+                    self.input_node = "input:0"
+                    self.output_node = "output:0"
+                
+                print(f"TensorFlow frozen graph loaded from {model_path}")
+            except Exception as e2:
+                print(f"Error loading TensorFlow model: {e2}")
+                self.model = None
+    
+    def process(self, input_tensor):
+        if self.model is None:
+            raise ValueError("No TensorFlow model loaded")
+        
+        # Convert PyTorch tensor to NumPy array
+        input_np = input_tensor.cpu().numpy()
+        
+        try:
+            # Try using the serving signature
+            if hasattr(self, 'infer'):
+                # Adapt based on your model's input requirements
+                tf_input = tf.convert_to_tensor(input_np)
+                result = self.infer(tf_input)
+                # Get the output tensor (adjust key as needed)
+                output_key = list(result.keys())[0]
+                output_np = result[output_key].numpy()
+            else:
+                # Use frozen graph
+                output_np = self.sess.run(
+                    self.output_node,
+                    {self.input_node: input_np}
+                )
+                
+            # Convert back to PyTorch tensor
+            return torch.from_numpy(output_np).to(input_tensor.device)
+        except Exception as e:
+            print(f"Error processing with TensorFlow model: {e}")
+            # Fallback to simple bicubic upsampling
+            return self._fallback_upscale(input_tensor)
+    
+    def _fallback_upscale(self, input_tensor):
+        # Simple fallback using PyTorch interpolation
+        print("Using fallback bicubic upscaling")
+        return torch.nn.functional.interpolate(
+            input_tensor, 
+            scale_factor=self.scale, 
+            mode='bicubic', 
+            align_corners=False
+        )
+
 def process_images(input_dir, output_dir=None, model_path=None, scale=4, 
-                   min_size=None, recursive=False, suffix="_sr", device=None):
+                   min_size=None, recursive=False, suffix="_sr", device=None,
+                   use_fallback=False):
     """
     Process images in a directory using EDSR super-resolution
     
@@ -116,6 +220,7 @@ def process_images(input_dir, output_dir=None, model_path=None, scale=4,
         recursive (bool): Process images in subdirectories
         suffix (str): Suffix to add to processed image filenames
         device (str): Device to use for processing ('cuda' or 'cpu')
+        use_fallback (bool): Use fallback bicubic upscaling instead of model
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -124,17 +229,66 @@ def process_images(input_dir, output_dir=None, model_path=None, scale=4,
     
     print(f"Using device: {device}")
     
-    # Initialize model
-    model = EDSR(scale=scale).to(device)
+    # Determine model type and load accordingly
+    model = None
+    tf_model = None
     
-    # Load pretrained model if available
-    if model_path and os.path.exists(model_path):
-        model.load_state_dict(torch.load(model_path, map_location=device))
-        print(f"Loaded model from {model_path}")
+    if use_fallback:
+        print("Using fallback bicubic upscaling instead of model")
+    elif model_path and os.path.exists(model_path):
+        if model_path.endswith('.pb') or os.path.isdir(model_path):
+            # TensorFlow model
+            if TF_AVAILABLE:
+                try:
+                    tf_model = TFModelHandler(model_path, scale)
+                    print(f"Using TensorFlow model from {model_path}")
+                except Exception as e:
+                    print(f"Error loading TensorFlow model: {e}")
+                    print("Using fallback bicubic upscaling")
+                    use_fallback = True
+            else:
+                print("TensorFlow not available. Using fallback bicubic upscaling")
+                use_fallback = True
+        else:
+            # PyTorch model
+            try:
+                model = EDSR(scale=scale).to(device)
+                
+                try:
+                    # Try loading with weights_only=True (safer)
+                    model.load_state_dict(torch.load(model_path, map_location=device))
+                    print(f"Loaded PyTorch model from {model_path}")
+                except Exception as e:
+                    print(f"Error loading model with weights_only=True: {e}")
+                    print("Attempting to load with weights_only=False (only do this if the model is from a trusted source)")
+                    warnings.warn("Loading model with weights_only=False can execute arbitrary code if the file is malicious")
+                    
+                    try:
+                        # Try with weights_only=False (potential security risk)
+                        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+                        
+                        # Handle different checkpoint formats
+                        if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
+                            model.load_state_dict(checkpoint['state_dict'])
+                        else:
+                            model.load_state_dict(checkpoint)
+                        
+                        print(f"Successfully loaded model from {model_path}")
+                    except Exception as e2:
+                        print(f"Error loading model with weights_only=False: {e2}")
+                        print("Using fallback bicubic upscaling")
+                        use_fallback = True
+            except Exception as e:
+                print(f"Error initializing PyTorch model: {e}")
+                print("Using fallback bicubic upscaling")
+                use_fallback = True
     else:
-        print("Using untrained model (results may be poor)")
+        if not use_fallback:
+            print("No model file found. Using fallback bicubic upscaling")
+            use_fallback = True
     
-    model.eval()
+    if model is not None:
+        model.eval()
     
     # Create output directory if it doesn't exist
     if output_dir and not os.path.exists(output_dir):
@@ -171,14 +325,37 @@ def process_images(input_dir, output_dir=None, model_path=None, scale=4,
             ])
             input_tensor = transform(img).unsqueeze(0).to(device)
             
-            # Process with EDSR
-            with torch.no_grad():
-                output_tensor = model(input_tensor)
+            # Process with model or fallback
+            if use_fallback:
+                # Simple bicubic upscaling
+                output_tensor = torch.nn.functional.interpolate(
+                    input_tensor, 
+                    scale_factor=scale, 
+                    mode='bicubic', 
+                    align_corners=False
+                )
+            elif tf_model is not None:
+                # Use TensorFlow model
+                output_tensor = tf_model.process(input_tensor)
+            else:
+                # Use PyTorch model
+                with torch.no_grad():
+                    output_tensor = model(input_tensor)
+            
+            # Show tensor statistics for debugging
+            min_val = output_tensor.min().item()
+            max_val = output_tensor.max().item()
+            mean_val = output_tensor.mean().item()
+            print(f"Output tensor stats - Min: {min_val}, Max: {max_val}, Mean: {mean_val}")
             
             # Convert back to PIL image
-            output_tensor = output_tensor.clamp(0, 1)
-            output_tensor = output_tensor * 2 - 1  # Denormalize
-            output_image = transforms.ToPILImage()(output_tensor.squeeze(0).cpu())
+            output_tensor = output_tensor.squeeze(0).cpu()
+            # Proper denormalization: from [-1,1] to [0,1] range
+            output_tensor = (output_tensor + 1) / 2
+            # Ensure values are in valid range
+            output_tensor = torch.clamp(output_tensor, 0, 1)
+            # Convert to PIL image
+            output_image = transforms.ToPILImage()(output_tensor)
             
             # Determine output path
             if output_dir:
@@ -197,6 +374,18 @@ def process_images(input_dir, output_dir=None, model_path=None, scale=4,
             output_image.save(output_path)
             print(f"Processed: {img_path} ({orig_size}) -> {output_path} ({output_image.size})")
             
+            # Save a side-by-side comparison for visual inspection
+            if output_dir:
+                comparison_path = os.path.join(output_subdir, f"{filename}_compare{ext}")
+                # Resize original to match SR image size for fair comparison
+                resized_original = img.resize((output_image.width, output_image.height), Image.BICUBIC)
+                # Create side-by-side image
+                comparison = Image.new('L', (output_image.width * 2, output_image.height))
+                comparison.paste(resized_original, (0, 0))
+                comparison.paste(output_image, (output_image.width, 0))
+                comparison.save(comparison_path)
+                print(f"Saved comparison to {comparison_path}")
+            
         except Exception as e:
             print(f"Error processing {img_path}: {e}")
     
@@ -206,7 +395,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="EDSR Super-Resolution for images")
     parser.add_argument("--input", type=str, required=True, help="Input directory containing images")
     parser.add_argument("--output", type=str, default=None, help="Output directory (default: same as input)")
-    parser.add_argument("--model", type=str, default="EDSR_x4.pb", help="Path to pretrained EDSR model")
+    parser.add_argument("--model", type=str, default="EDSR_x4.pb", help="Path to pretrained model (.pth for PyTorch, .pb for TensorFlow)")
     parser.add_argument("--scale", type=int, default=4, help="Super-resolution scale factor (default: 4)")
     parser.add_argument("--min-size", type=int, default=None, 
                         help="Only process images smaller than this size (default: process all)")
@@ -214,6 +403,7 @@ if __name__ == "__main__":
     parser.add_argument("--suffix", type=str, default="_sr", help="Suffix for processed image filenames")
     parser.add_argument("--device", type=str, default=None, 
                         help="Device to use for processing (default: cuda if available, else cpu)")
+    parser.add_argument("--fallback", action="store_true", help="Use bicubic upscaling instead of model")
     
     args = parser.parse_args()
     
@@ -225,5 +415,6 @@ if __name__ == "__main__":
         min_size=args.min_size,
         recursive=args.recursive,
         suffix=args.suffix,
-        device=args.device
+        device=args.device,
+        use_fallback=args.fallback
     )
