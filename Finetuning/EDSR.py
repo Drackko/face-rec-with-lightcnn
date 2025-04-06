@@ -20,14 +20,24 @@ except ImportError:
     print("TensorFlow is not available. Only PyTorch models can be used.")
 
 # EDSR Model Definition (PyTorch)
-class MeanShift(nn.Conv2d):
-    def __init__(self, rgb_range, rgb_mean, rgb_std, sign=-1):
-        super(MeanShift, self).__init__(1, 1, kernel_size=1)
+class MeanShift(nn.Module):
+    def __init__(self, rgb_range=1.0, rgb_mean=(0.4488, 0.4371, 0.4040), rgb_std=(1.0, 1.0, 1.0), sign=-1):
+        super(MeanShift, self).__init__()
+        
+        self.rgb_range = rgb_range
+        
+        # Handle both RGB and grayscale inputs safely
+        if not isinstance(rgb_mean, tuple):
+            rgb_mean = (rgb_mean,)
+        if not isinstance(rgb_std, tuple):
+            rgb_std = (rgb_std,)
+        
         std = torch.Tensor(rgb_std)
-        self.weight.data = torch.eye(1).view(1, 1, 1, 1) / std.view(1, 1, 1, 1)
-        self.bias.data = sign * rgb_range * torch.Tensor(rgb_mean) / std
-        for p in self.parameters():
-            p.requires_grad = False
+        self.weight = nn.Parameter(torch.eye(len(rgb_mean)).view(len(rgb_mean), len(rgb_mean), 1, 1) / std.view(len(rgb_mean), 1, 1, 1), requires_grad=False)
+        self.bias = nn.Parameter(sign * rgb_range * torch.Tensor(rgb_mean) / std, requires_grad=False)
+
+    def forward(self, x):
+        return nn.functional.conv2d(x, self.weight, self.bias)
 
 class ResBlock(nn.Module):
     def __init__(self, n_feats, kernel_size, bias=True, bn=False, act=nn.ReLU(True), res_scale=1):
@@ -71,16 +81,22 @@ class Upsampler(nn.Sequential):
         super(Upsampler, self).__init__(*m)
 
 class EDSR(nn.Module):
-    def __init__(self, scale=4, n_resblocks=16, n_feats=64, res_scale=1):
+    def __init__(self, scale=4, n_resblocks=16, n_feats=64, res_scale=1, n_colors=3):
         super(EDSR, self).__init__()
         
-        # RGB mean for input normalization (grayscale for LightCNN)
-        rgb_mean = (0.5,)
-        rgb_std = (1.0,)
-        self.sub_mean = MeanShift(1, rgb_mean, rgb_std)
+        # Define standardization values
+        rgb_mean = (0.4488, 0.4371, 0.4040)  # Use (0.5,) for grayscale
+        rgb_std = (1.0, 1.0, 1.0)
+        rgb_range = 1.0
         
-        # define head module
-        m_head = [nn.Conv2d(1, n_feats, 3, padding=1)]
+        # Create MeanShift layers with all required parameters
+        self.sub_mean = MeanShift(rgb_range, rgb_mean[:n_colors], rgb_std[:n_colors])
+        self.add_mean = MeanShift(rgb_range, rgb_mean[:n_colors], rgb_std[:n_colors], sign=1)
+        
+        self.head = nn.Sequential(
+            nn.Conv2d(n_colors, n_feats, 3, padding=1),
+            nn.ReLU(True)
+        )
 
         # define body module
         m_body = [
@@ -92,12 +108,9 @@ class EDSR(nn.Module):
         # define tail module
         m_tail = [
             Upsampler(scale, n_feats),
-            nn.Conv2d(n_feats, 1, 3, padding=1)
+            nn.Conv2d(n_feats, n_colors, 3, padding=1)
         ]
 
-        self.add_mean = MeanShift(1, rgb_mean, rgb_std, 1)
-
-        self.head = nn.Sequential(*m_head)
         self.body = nn.Sequential(*m_body)
         self.tail = nn.Sequential(*m_tail)
 
@@ -117,6 +130,7 @@ class EDSR(nn.Module):
 class TFModelHandler:
     def __init__(self, model_path, scale=4):
         self.model = None
+        self.sess = None  # Session needs to be initialized
         self.scale = scale
         self.load_model(model_path)
         
@@ -134,8 +148,10 @@ class TFModelHandler:
             print("Model input:", self.infer.structured_input_signature)
             print("Model output:", self.infer.structured_outputs)
         except Exception as e:
+            print(f"Failed to load as saved model: {e}")
             # If the above fails, try loading as a frozen graph
             try:
+                print(f"Attempting to load as frozen graph from {model_path}")
                 with tf.io.gfile.GFile(model_path, "rb") as f:
                     graph_def = tf.compat.v1.GraphDef()
                     graph_def.ParseFromString(f.read())
@@ -147,26 +163,30 @@ class TFModelHandler:
                 self.sess = tf.compat.v1.Session(graph=self.graph)
                 
                 # Find input and output nodes
-                input_nodes = [n.name for n in graph_def.node if "input" in n.name.lower()]
-                output_nodes = [n.name for n in graph_def.node if "output" in n.name.lower()]
+                operations = self.graph.get_operations()
+                input_nodes = [op.name for op in operations if 'input' in op.name.lower()]
+                output_nodes = [op.name for op in operations if 'output' in op.name.lower()]
+                
+                print(f"Available operations: {[op.name for op in operations[:10]]}...")
                 
                 if input_nodes and output_nodes:
-                    self.input_node = input_nodes[0]
-                    self.output_node = output_nodes[0]
-                    print(f"Model input node: {self.input_node}")
-                    print(f"Model output node: {self.output_node}")
+                    self.input_node = input_nodes[0] + ':0'
+                    self.output_node = output_nodes[0] + ':0'
                 else:
-                    print("Could not identify input/output nodes. Using default names.")
-                    self.input_node = "input:0"
-                    self.output_node = "output:0"
+                    print("Using placeholder names. Will try common tensor names during processing")
+                    self.input_node = "input_tensor:0"
+                    self.output_node = "EDSR/output_conv/BiasAdd:0"
                 
-                print(f"TensorFlow frozen graph loaded from {model_path}")
+                print(f"Input node: {self.input_node}")
+                print(f"Output node: {self.output_node}")
+                print("TensorFlow frozen graph loaded successfully")
             except Exception as e2:
                 print(f"Error loading TensorFlow model: {e2}")
                 self.model = None
+                self.sess = None
     
     def process(self, input_tensor):
-        if self.model is None:
+        if self.model is None and self.sess is None:
             raise ValueError("No TensorFlow model loaded")
         
         # Convert PyTorch tensor to NumPy array
@@ -181,17 +201,49 @@ class TFModelHandler:
                 # Get the output tensor (adjust key as needed)
                 output_key = list(result.keys())[0]
                 output_np = result[output_key].numpy()
+            elif self.sess is not None:
+                # Try different tensor names if needed
+                try:
+                    # Get all operations in the graph
+                    ops = self.graph.get_operations()
+                    input_tensors = [op.name + ':0' for op in ops if 'input' in op.name.lower() or 'placeholder' in op.name.lower()]
+                    output_tensors = [op.name + ':0' for op in ops if 'output' in op.name.lower() or 'add_mean' in op.name.lower()]
+                    
+                    if input_tensors and output_tensors:
+                        print(f"Using tensors: Input={input_tensors[0]}, Output={output_tensors[0]}")
+                        self.input_node = input_tensors[0]
+                        self.output_node = output_tensors[0]
+                    
+                    # Use frozen graph
+                    output_np = self.sess.run(
+                        self.output_node,
+                        {self.input_node: input_np}
+                    )
+                except Exception as inner_e:
+                    print(f"Failed with specific tensor names: {inner_e}")
+                    print("Trying with common tensor names...")
+                    # Last resort - try common output tensor names
+                    for potential_output in ['output:0', 'NHWC_output:0', 'add_mean/add:0']:
+                        try:
+                            output_np = self.sess.run(
+                                potential_output,
+                                {self.input_node: input_np}
+                            )
+                            print(f"Success with output tensor: {potential_output}")
+                            self.output_node = potential_output
+                            break
+                        except:
+                            continue
+                    else:
+                        raise ValueError("Could not find valid output tensor")
             else:
-                # Use frozen graph
-                output_np = self.sess.run(
-                    self.output_node,
-                    {self.input_node: input_np}
-                )
+                raise ValueError("Neither saved model nor session is available")
                 
             # Convert back to PyTorch tensor
             return torch.from_numpy(output_np).to(input_tensor.device)
         except Exception as e:
             print(f"Error processing with TensorFlow model: {e}")
+            print("Using fallback bicubic upsampling")
             # Fallback to simple bicubic upsampling
             return self._fallback_upscale(input_tensor)
     
@@ -253,36 +305,42 @@ def process_images(input_dir, output_dir=None, model_path=None, scale=4,
         else:
             # PyTorch model
             try:
-                model = EDSR(scale=scale).to(device)
+                print(f"Loading PyTorch EDSR model from {model_path}")
+                # Use grayscale configuration (1 channel)
+                sr_model = EDSR(scale=4, n_colors=1).to(device)  # Use 1 channel for grayscale
                 
-                try:
-                    # Try loading with weights_only=True (safer)
-                    model.load_state_dict(torch.load(model_path, map_location=device))
-                    print(f"Loaded PyTorch model from {model_path}")
-                except Exception as e:
-                    print(f"Error loading model with weights_only=True: {e}")
-                    print("Attempting to load with weights_only=False (only do this if the model is from a trusted source)")
-                    warnings.warn("Loading model with weights_only=False can execute arbitrary code if the file is malicious")
+                print(f"EDSR model structure: {sr_model}")
+                
+                # Load checkpoint
+                checkpoint = torch.load(model_path, map_location=device)
+                print(f"Checkpoint keys: {list(checkpoint.keys())[:5]}...")
+                
+                # Create a new state dict with proper key mapping
+                new_state_dict = {}
+                for k, v in checkpoint.items():
+                    # Handle both module prefix and channel count mismatch
+                    name = k[7:] if k.startswith('module.') else k
                     
-                    try:
-                        # Try with weights_only=False (potential security risk)
-                        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
-                        
-                        # Handle different checkpoint formats
-                        if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
-                            model.load_state_dict(checkpoint['state_dict'])
-                        else:
-                            model.load_state_dict(checkpoint)
-                        
-                        print(f"Successfully loaded model from {model_path}")
-                    except Exception as e2:
-                        print(f"Error loading model with weights_only=False: {e2}")
-                        print("Using fallback bicubic upscaling")
-                        use_fallback = True
+                    # For MeanShift layers which might have channel dimension mismatch
+                    if ('sub_mean' in name or 'add_mean' in name) and 'weight' in name:
+                        # Original is likely [3,3,1,1] but we need [1,1,1,1]
+                        if v.size(0) == 3 and sr_model.state_dict()[name].size(0) == 1:
+                            # Take only the first channel
+                            print(f"Adapting {name} from shape {v.shape} to {sr_model.state_dict()[name].shape}")
+                            v = v[0:1, 0:1, :, :]
+                    
+                    if name in sr_model.state_dict():
+                        if v.shape != sr_model.state_dict()[name].shape:
+                            print(f"Shape mismatch for {name}: checkpoint {v.shape} vs model {sr_model.state_dict()[name].shape}")
+                            continue
+                        new_state_dict[name] = v
+                
+                # Load adapted weights
+                sr_model.load_state_dict(new_state_dict, strict=False)
+                print("EDSR model loaded successfully!")
             except Exception as e:
-                print(f"Error initializing PyTorch model: {e}")
-                print("Using fallback bicubic upscaling")
-                use_fallback = True
+                print(f"Failed to load EDSR model: {e}")
+                sr_model = None
     else:
         if not use_fallback:
             print("No model file found. Using fallback bicubic upscaling")
@@ -352,21 +410,21 @@ def process_images(input_dir, output_dir=None, model_path=None, scale=4,
             input_tensor = transform(img_cropped).unsqueeze(0).to(device)
             
             # Process with model or fallback
-            if use_fallback:
-                # Simple bicubic upscaling
-                output_tensor = torch.nn.functional.interpolate(
-                    input_tensor, 
-                    scale_factor=scale, 
-                    mode='bicubic', 
-                    align_corners=False
-                )
-            elif tf_model is not None:
-                # Use TensorFlow model
-                output_tensor = tf_model.process(input_tensor)
-            else:
-                # Use PyTorch model
+            if 'sr_model' in locals() and sr_model is not None:
                 with torch.no_grad():
-                    output_tensor = model(input_tensor)
+                    # Convert grayscale to 3 channels if needed
+                    if input_tensor.size(1) == 1 and sr_model.sub_mean.weight.size(0) == 3:
+                        input_tensor = input_tensor.repeat(1, 3, 1, 1)
+                    output_tensor = sr_model(input_tensor)
+                    # If model output is RGB but we need grayscale, take first channel
+                    if output_tensor.size(1) == 3:
+                        output_tensor = output_tensor[:, 0:1, :, :]
+            else:
+                # Use fallback
+                print("Model not loaded properly, using fallback")
+                output_tensor = torch.nn.functional.interpolate(
+                    input_tensor, scale_factor=scale, mode='bicubic', align_corners=False
+                )
             
             # Show tensor statistics for debugging
             min_val = output_tensor.min().item()
@@ -394,7 +452,6 @@ def process_images(input_dir, output_dir=None, model_path=None, scale=4,
                 output_subdir = os.path.dirname(os.path.join(output_dir, rel_path))
                 if output_subdir and not os.path.exists(output_subdir):
                     os.makedirs(output_subdir)
-                
                 filename, ext = os.path.splitext(os.path.basename(img_path))
                 output_path = os.path.join(output_subdir, f"{filename}{suffix}{ext}")
             else:
@@ -416,11 +473,65 @@ def process_images(input_dir, output_dir=None, model_path=None, scale=4,
                 comparison.paste(output_image, (target_size, 0))
                 comparison.save(comparison_path)
                 print(f"Saved comparison to {comparison_path}")
-            
         except Exception as e:
             print(f"Error processing {img_path}: {e}")
-    
     print("Processing complete!")
+
+class SimpleDataset(torch.utils.data.Dataset):
+    def __init__(self, images, labels, transform=None, apply_sr=False, sr_model=None, device=None, min_size=128):
+        self.images = images
+        self.labels = labels
+        self.transform = transform
+        self.apply_sr = apply_sr
+        self.sr_model = sr_model
+        self.device = device
+        self.min_size = min_size
+
+    def __len__(self):
+        return len(self.images)
+
+    def __getitem__(self, idx):
+        img_path = self.images[idx]
+        label = self.labels[idx]
+        
+        # Load image as grayscale
+        image = Image.open(img_path).convert('L')  # Grayscale
+        
+        # Determine if super-resolution is needed based on image size
+        needs_sr = False
+        if self.apply_sr and self.sr_model is not None:
+            width, height = image.size
+            if width < self.min_size or height < self.min_size:
+                needs_sr = True
+        
+        if needs_sr:
+            # For SR model, convert grayscale to proper format
+            # Create a single-channel tensor
+            sr_input = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize([0.5], [0.5])  # Single channel normalization
+            ])(image)
+            
+            # Apply super-resolution
+            with torch.no_grad():
+                sr_input = sr_input.unsqueeze(0).to(self.device)
+                sr_output = self.sr_model(sr_input)
+                # Denormalize output
+                sr_output = sr_output.squeeze(0).cpu()
+                sr_output = (sr_output + 1) / 2
+                sr_output = torch.clamp(sr_output, 0, 1)
+                sr_image = transforms.ToPILImage()(sr_output)
+                
+                # Ensure output size is 128x128
+                if sr_image.size != (128, 128):
+                    sr_image = sr_image.resize((128, 128), Image.LANCZOS)
+                image = sr_image
+        
+        # Apply final transform for the model
+        if self.transform:
+            image = self.transform(image)
+        
+        return image, label, os.path.basename(os.path.dirname(img_path))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="EDSR Super-Resolution for images")
@@ -437,7 +548,6 @@ if __name__ == "__main__":
     parser.add_argument("--fallback", action="store_true", help="Use bicubic upscaling instead of model")
     parser.add_argument("--target-size", type=int, default=128, 
                         help="Target size for output images (default: 128 for face recognition)")
-    
     args = parser.parse_args()
     
     process_images(
