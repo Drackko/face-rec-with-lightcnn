@@ -4,7 +4,7 @@ data/dataset_1_grayscale/
 checkpoints/LightCNN_29Layers_V2_checkpoint.pth.tar
 /data/dataset_1/
 /data/
-StudentDataset-ML_A/data
+StudentDataset-ML_A/
 data_processed/
 base_dataset/video
 base_dataset/raw_faces
