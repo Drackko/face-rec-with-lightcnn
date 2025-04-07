@@ -5,7 +5,7 @@ import numpy as np
 from ultralytics import YOLO
 import argparse
 
-def detect_and_save_faces(video_path, output_dir="/mnt/data/PROJECTS/face-rec-lightcnn/base_dataset/test_faces", 
+def detect_and_save_faces(video_path, output_dir="/mnt/data/PROJECTS/face-rec-lightcnn/base_dataset/person", 
                          confidence=0.7):
     """
     Detect faces in a video using YOLOv8 and save faces with confidence ≥ 0.7
@@ -19,7 +19,7 @@ def detect_and_save_faces(video_path, output_dir="/mnt/data/PROJECTS/face-rec-li
     os.makedirs(output_dir, exist_ok=True)
     
     # Load YOLO model for face detection
-    model = YOLO("weights/yolo11n-face.pt")
+    model = YOLO("weights/person_detection.pt")
     
     # Get video filename for naming
     video_name = os.path.splitext(os.path.basename(video_path))[0]
@@ -67,9 +67,9 @@ def detect_and_save_faces(video_path, output_dir="/mnt/data/PROJECTS/face-rec-li
                 # Convert coordinates to integers
                 x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
                 
-                # Add margins (20% of width/height)
+                # Add margins (1% of width/height)
                 w, h = x2 - x1, y2 - y1
-                margin_x, margin_y = int(0.2 * w), int(0.2 * h)
+                margin_x, margin_y = int(0.01 * w), int(0.01 * h)
                 
                 # Ensure coordinates are within frame boundaries
                 x1 = max(0, x1 - margin_x)
@@ -108,7 +108,7 @@ def detect_and_save_faces(video_path, output_dir="/mnt/data/PROJECTS/face-rec-li
     print(f"Total faces saved: {faces_saved}")
     print("="*50)
 
-def process_videos(video_dir, output_dir="/mnt/data/PROJECTS/face-rec-lightcnn/base_dataset/test_faces", 
+def process_videos(video_dir, output_dir="/mnt/data/PROJECTS/face-rec-lightcnn/base_dataset/person", 
                  confidence=0.7):
     """
     Process all video files in a directory
@@ -124,7 +124,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Detect and crop faces from videos")
     parser.add_argument("--video", help="Path to a single video file")
     parser.add_argument("--video_dir", help="Directory containing video files")
-    parser.add_argument("--output", default="/mnt/data/PROJECTS/face-rec-lightcnn/base_dataset/test_faces", 
+    parser.add_argument("--output", default="/mnt/data/PROJECTS/face-rec-lightcnn/base_dataset/person", 
                         help="Output directory for cropped faces")
     parser.add_argument("--conf", type=float, default=0.7, help="Confidence threshold for detection")
     

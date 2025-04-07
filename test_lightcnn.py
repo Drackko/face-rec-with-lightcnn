@@ -7,11 +7,13 @@ from LightCNN.light_cnn import LightCNN_29Layers_v2
 import torchvision.transforms as transforms
 from PIL import Image
 from collections import defaultdict
-import time  # Add this at the top with other imports
+import time
+import threading
+import queue
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 YOLO_MODEL_PATH = os.path.join(BASE_DIR,"yolo", "weights", "yolo11n-face.pt")
-MODEL_WEIGHTS_PATH = os.path.join(BASE_DIR, "test.pth")
+MODEL_WEIGHTS_PATH = os.path.join(BASE_DIR, "lightcnn_model.pth")
 
 # Configuration
 CONFIDENCE_THRESHOLD = 0.95
@@ -40,7 +42,7 @@ if 'idx_to_class' in checkpoint:
         print(f"  ... and {len(class_names)-5} more classes")
 else:
     # Fallback to hardcoded class names
-    class_names = ["mithun","sai"]
+    class_names = ["mithun","sai","sidd"]
     print(f"Using hardcoded class names: {class_names}")
 
 # Initialize model
@@ -70,7 +72,7 @@ transform = transforms.Compose([
 ])
 
 # Open video capture
-video_path = "/home/drackko/Videos/vid/new_test1.mp4"
+video_path = "/home/drackko/Videos/vid/test3.mp4"
 print(f"Opening video from {video_path}")
 cap = cv2.VideoCapture(video_path)
 
@@ -99,7 +101,142 @@ print(f"Video FPS: {fps}")
 process_interval_no_faces = 1.0  # 1 frame per second
 process_interval_with_faces = 1.0/3.0  # 3 frames per second
 
-print("Starting face recognition loop with adaptive processing...")
+# Add these variables at the top of your script
+processing_frame = None
+processing_result = None
+processing_lock = threading.Lock()
+stop_signal = threading.Event()
+
+# Processing function that will run in a separate thread
+def process_frames():
+    global processing_frame, processing_result, last_process_time, faces_detected_last_frame
+    
+    last_process_time = 0
+    faces_detected_last_frame = False
+    
+    while not stop_signal.is_set():
+        # Get current time
+        current_time = time.time()
+        
+        # Determine processing interval
+        if faces_detected_last_frame:
+            process_interval = process_interval_with_faces  # 1/3 second
+        else:
+            process_interval = process_interval_no_faces  # 1 second
+            
+        # Check if we should process now
+        if current_time - last_process_time >= process_interval:
+            # Get the latest frame with thread safety
+            with processing_lock:
+                if processing_frame is None:
+                    time.sleep(0.01)  # Small sleep to prevent CPU hogging
+                    continue
+                frame_to_process = processing_frame.copy()
+            
+            # Process the frame (face detection and recognition)
+            results = yolo_model(frame_to_process)
+            detected_faces = []
+            
+            # Existing face detection code...
+            for result in results:
+                for box in result.boxes:
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    detection_confidence = float(box.conf[0])
+                    
+                    if detection_confidence < 0.4:  # Skip low-confidence detections
+                        continue
+
+                    # Extract the detected face
+                    face = frame_to_process[y1:y2, x1:x2]
+                    if face.size == 0:  # Skip if face region is empty
+                        continue
+                        
+                    try:
+                        # Convert to grayscale and prepare for model
+                        face_pil = Image.fromarray(cv2.cvtColor(face, cv2.COLOR_BGR2RGB))
+                        face_tensor = transform(face_pil).unsqueeze(0).to(device)
+
+                        # Run the face through LightCNN for recognition
+                        with torch.no_grad():
+                            output = model(face_tensor)
+                            
+                            # Handle model output format (features, logits)
+                            if isinstance(output, tuple):
+                                features, logits = output
+                            else:
+                                logits = output
+                                
+                            # Get probabilities with softmax
+                            probs = torch.nn.functional.softmax(logits, dim=1)[0]
+                            
+                            # Store top 3 predictions for this face
+                            top_values, top_indices = torch.topk(probs, min(3, len(probs)))
+                            
+                            predictions = []
+                            for i in range(len(top_indices)):
+                                idx = top_indices[i].item()
+                                conf = top_values[i].item()
+                                if idx < len(class_names):
+                                    predictions.append((class_names[idx], conf, idx))
+                        
+                        # Add face to collection with its coordinates and predictions
+                        detected_faces.append({
+                            'coords': (x1, y1, x2, y2),
+                            'predictions': predictions
+                        })
+                            
+                    except Exception as e:
+                        print(f"Error processing face: {e}")
+                        # Still store the face but with no predictions
+                        detected_faces.append({
+                            'coords': (x1, y1, x2, y2),
+                            'predictions': []
+                        })
+            
+            # Update whether faces were detected
+            faces_detected_last_frame = len(detected_faces) > 0
+            
+            # Second pass: Find highest confidence for each class
+            # For each class label, only the face with highest confidence will get that label
+            class_to_best_face = {}  # Maps class name to (face_index, confidence)
+            
+            for face_idx, face_data in enumerate(detected_faces):
+                for class_name, confidence, class_idx in face_data['predictions']:
+                    # Only consider predictions above threshold
+                    if confidence < CONFIDENCE_THRESHOLD:
+                        continue
+                        
+                    # Is this the best confidence we've seen for this class?
+                    if (class_name not in class_to_best_face or 
+                        confidence > class_to_best_face[class_name][1]):
+                        class_to_best_face[class_name] = (face_idx, confidence)
+            
+            # Update processing results with thread safety
+            with processing_lock:
+                processing_result = {
+                    'frame': frame_to_process,
+                    'detected_faces': detected_faces,
+                    'class_to_best_face': class_to_best_face,
+                    'faces_detected': len(detected_faces) > 0
+                }
+                faces_detected_last_frame = len(detected_faces) > 0
+                last_process_time = current_time
+        
+        else:
+            # Sleep a bit to prevent CPU hogging
+            time.sleep(0.01)
+
+# Main video loop updated to only show annotated frames
+print("Starting face recognition with background processing...")
+
+# Start the processing thread
+processing_thread = threading.Thread(target=process_frames)
+processing_thread.daemon = True
+processing_thread.start()
+
+# Keep track of last displayed results
+current_display_result = None
+last_annotated_frame = None
 
 while cap.isOpened():
     ret, frame = cap.read()
@@ -107,112 +244,32 @@ while cap.isOpened():
         print("End of video stream")
         break
     
-    current_time = time.time()
+    # Update the frame to be processed
+    with processing_lock:
+        processing_frame = frame.copy()
+        result = processing_result  # Get the latest result
     
-    # Determine processing interval based on previous detection
-    if faces_detected_last_frame:
-        # Process 3 frames per second
-        process_interval = process_interval_with_faces
-    else:
-        # Process 1 frame per second
-        process_interval = process_interval_no_faces
+    # Check if we have new results with faces
+    display_update_needed = False
+    if result is not None:
+        current_display_result = result
+        # Only update display if faces were detected
+        if len(current_display_result['detected_faces']) > 0:
+            display_update_needed = True
     
-    # Check if we should process this frame
-    should_process = current_time - last_process_time >= process_interval
-    
-    # Always show the frame, but only process it when needed
-    if should_process:
-        last_process_time = current_time
+    # Only create and show new frame if we have faces to display
+    if display_update_needed:
+        display_frame = frame.copy()
         
-        # Detect faces with YOLO
-        results = yolo_model(frame)
-        
-        # Reset detection tracking
-        detected_faces = []
-        
-        # First pass: Detect and recognize all faces
-        for result in results:
-            for box in result.boxes:
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
-                detection_confidence = float(box.conf[0])
-                
-                if detection_confidence < 0.4:  # Skip low-confidence detections
-                    continue
-
-                # Extract the detected face
-                face = frame[y1:y2, x1:x2]
-                if face.size == 0:  # Skip if face region is empty
-                    continue
-                    
-                try:
-                    # Convert to grayscale and prepare for model
-                    face_pil = Image.fromarray(cv2.cvtColor(face, cv2.COLOR_BGR2RGB))
-                    face_tensor = transform(face_pil).unsqueeze(0).to(device)
-
-                    # Run the face through LightCNN for recognition
-                    with torch.no_grad():
-                        output = model(face_tensor)
-                        
-                        # Handle model output format (features, logits)
-                        if isinstance(output, tuple):
-                            features, logits = output
-                        else:
-                            logits = output
-                            
-                        # Get probabilities with softmax
-                        probs = torch.nn.functional.softmax(logits, dim=1)[0]
-                        
-                        # Store top 3 predictions for this face
-                        top_values, top_indices = torch.topk(probs, min(3, len(probs)))
-                        
-                        predictions = []
-                        for i in range(len(top_indices)):
-                            idx = top_indices[i].item()
-                            conf = top_values[i].item()
-                            if idx < len(class_names):
-                                predictions.append((class_names[idx], conf, idx))
-                    
-                    # Add face to collection with its coordinates and predictions
-                    detected_faces.append({
-                        'coords': (x1, y1, x2, y2),
-                        'predictions': predictions
-                    })
-                        
-                except Exception as e:
-                    print(f"Error processing face: {e}")
-                    # Still store the face but with no predictions
-                    detected_faces.append({
-                        'coords': (x1, y1, x2, y2),
-                        'predictions': []
-                    })
-        
-        # Update whether faces were detected
-        faces_detected_last_frame = len(detected_faces) > 0
-        
-        # Second pass: Find highest confidence for each class
-        # For each class label, only the face with highest confidence will get that label
-        class_to_best_face = {}  # Maps class name to (face_index, confidence)
-        
-        for face_idx, face_data in enumerate(detected_faces):
-            for class_name, confidence, class_idx in face_data['predictions']:
-                # Only consider predictions above threshold
-                if confidence < CONFIDENCE_THRESHOLD:
-                    continue
-                    
-                # Is this the best confidence we've seen for this class?
-                if (class_name not in class_to_best_face or 
-                    confidence > class_to_best_face[class_name][1]):
-                    class_to_best_face[class_name] = (face_idx, confidence)
-        
-        # Third pass: Draw the results
-        for face_idx, face_data in enumerate(detected_faces):
+        # Draw bounding boxes and labels
+        for face_data in current_display_result['detected_faces']:
             x1, y1, x2, y2 = face_data['coords']
             assigned_label = None
             assigned_confidence = 0
             
             # Check if this face is the best match for any class
-            for class_name, (best_face_idx, confidence) in class_to_best_face.items():
-                if face_idx == best_face_idx:
+            for class_name, (best_face_idx, confidence) in current_display_result['class_to_best_face'].items():
+                if face_data == current_display_result['detected_faces'][best_face_idx]:
                     assigned_label = class_name
                     assigned_confidence = confidence
                     break
@@ -220,64 +277,44 @@ while cap.isOpened():
             # Draw bounding box and label
             if assigned_label:
                 # High confidence - green
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 label = f"{assigned_label} ({assigned_confidence*100:.1f}%)"
-                cv2.putText(frame, label, (x1, y1 - 10), 
+                cv2.putText(display_frame, label, (x1, y1 - 10), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             else:
                 # No confident assignment - orange
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 165, 255), 2)
-                cv2.putText(frame, "Unknown", (x1, y1 - 10),
+                cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 165, 255), 2)
+                cv2.putText(display_frame, "Unknown", (x1, y1 - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
         
-        # Update processing rate display
-        processing_rate = "3 frames/sec" if faces_detected_last_frame else "1 frame/sec" 
-        cv2.putText(frame, f"Processing: {processing_rate}", 
+        # Draw your stats and other overlays
+        cv2.putText(display_frame, f"Faces: {len(current_display_result['detected_faces'])} | Identified: {len(current_display_result['class_to_best_face'])}", 
+                    (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        # Show processing rate
+        processing_rate = "3 frames/sec" if current_display_result['faces_detected'] else "1 frame/sec" 
+        cv2.putText(display_frame, f"Processing: {processing_rate}", 
                     (10, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-    else:
-        # Just display previous detection results without new processing
-        # Draw stored face boxes and labels from last processing if available
-        if 'detected_faces' in locals() and detected_faces:
-            for face_data in detected_faces:
-                x1, y1, x2, y2 = face_data['coords']
-                assigned_label = None
-                assigned_confidence = 0
-                
-                # Check if this face is the best match for any class
-                for class_name, (best_face_idx, confidence) in class_to_best_face.items():
-                    if face_data == detected_faces[best_face_idx]:
-                        assigned_label = class_name
-                        assigned_confidence = confidence
-                        break
-                
-                # Draw bounding box and label
-                if assigned_label:
-                    # High confidence - green
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    label = f"{assigned_label} ({assigned_confidence*100:.1f}%)"
-                    cv2.putText(frame, label, (x1, y1 - 10), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-                else:
-                    # No confident assignment - orange
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 165, 255), 2)
-                    cv2.putText(frame, "Unknown", (x1, y1 - 10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
+        
+        # Add timestamp info
+        timestamp = cap.get(cv2.CAP_PROP_POS_MSEC)/1000.0
+        cv2.putText(display_frame, f"Timestamp: {timestamp:.2f}s", 
+                    (10, 125), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                    
+        # Save this as our last annotated frame
+        last_annotated_frame = display_frame
+        
+        # Show the annotated frame
+        cv2.imshow("Face Recognition", display_frame)
     
-    # Add frame information
-    cv2.putText(frame, f"Faces: {len(detected_faces)} | Identified: {len(class_to_best_face)}", 
-                (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-    cv2.putText(frame, f"Confidence threshold: {CONFIDENCE_THRESHOLD*100:.0f}%", 
-                (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-
-    # Show video output
-    cv2.imshow("Face Recognition", frame)
-
-    # Press 'q' to exit
+    # Process keyboard input at full frame rate
     if cv2.waitKey(1) & 0xFF == ord("q"):
         print("User requested exit")
         break
 
-# Release resources
+# Clean up
+stop_signal.set()  # Signal the processing thread to stop
+processing_thread.join(timeout=1.0)  # Wait for thread to finish
 cap.release()
 cv2.destroyAllWindows()
 print("Face recognition completed")

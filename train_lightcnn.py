@@ -22,7 +22,7 @@ parser.add_argument("--data-dir", type=str, default="data_processed/tinyfaces",
                     help="Directory with class folders")
 parser.add_argument("--batch-size", type=int, default=16, help="Batch size")
 parser.add_argument("--epochs", type=int, default=10, help="Number of epochs")
-parser.add_argument("--lr", type=float, default=0.0001, help="Learning rate")
+parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
 parser.add_argument("--cpu", action="store_true", help="Force CPU training")
 parser.add_argument("--debug", action="store_true", help="Enable debug mode")
 parser.add_argument("--output", type=str, default="lightcnn_model.pth", 
