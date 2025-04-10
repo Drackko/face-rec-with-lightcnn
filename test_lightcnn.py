@@ -40,10 +40,6 @@ if 'idx_to_class' in checkpoint:
         print(f"  Class {i}: {class_names[i]}")
     if len(class_names) > 5:
         print(f"  ... and {len(class_names)-5} more classes")
-else:
-    # Fallback to hardcoded class names
-    class_names = ["mithun","sai","sidd"]
-    print(f"Using hardcoded class names: {class_names}")
 
 # Initialize model
 num_classes = len(class_names)
@@ -72,7 +68,7 @@ transform = transforms.Compose([
 ])
 
 # Open video capture
-video_path = "/home/drackko/Videos/vid/test3.mp4"
+video_path = 0
 print(f"Opening video from {video_path}")
 cap = cv2.VideoCapture(video_path)
 

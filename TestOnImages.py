@@ -13,7 +13,7 @@ def process_images(input_dir, output_dir, confidence_threshold=0.9999):
     # Setup paths
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     YOLO_MODEL_PATH = os.path.join(BASE_DIR, "yolo", "weights", "yolo11n-face.pt")
-    MODEL_WEIGHTS_PATH = os.path.join(BASE_DIR, "lightcnn_face_recognizer.pth")
+    MODEL_WEIGHTS_PATH = os.path.join(BASE_DIR, "Oldmodel.pth")
     
     # Load models
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
