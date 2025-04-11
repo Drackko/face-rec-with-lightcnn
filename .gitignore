@@ -22,4 +22,5 @@ lcnnSiddSai.pth
 enhanced_open-cv
 gallery/DB
 processed_faces
-
+augmented_dataset/
+op/

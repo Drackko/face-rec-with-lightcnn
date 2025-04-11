@@ -170,6 +170,93 @@ def extract_faces_from_video(video_path, output_base_dir,
     
     return faces_saved
 
+def extract_faces_from_image(image_path, output_base_dir, 
+                            face_model_path="yolo/weights/yolo11n-face.pt",
+                            face_confidence=0.5, face_padding=0.2):
+    """
+    Extract faces from an image, preprocess them, and save to output directory.
+    
+    Args:
+        image_path: Path to image file
+        output_base_dir: Base directory for outputs
+        face_model_path: Path to YOLO face detection model
+        face_confidence: Confidence threshold for face detection
+        face_padding: Padding around detected faces (percentage of face size)
+        
+    Returns:
+        Number of faces saved
+    """
+    # Get image name without extension for the output folder
+    image_name = os.path.splitext(os.path.basename(image_path))[0]
+    output_dir = os.path.join(output_base_dir, "images")
+    
+    # Create output directory
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Load YOLO face detection model if not already loaded
+    print(f"Loading YOLO face detection model from {face_model_path}")
+    face_model = YOLO(face_model_path)
+    
+    # Read image
+    frame = cv2.imread(image_path)
+    if frame is None:
+        print(f"Error: Could not read image {image_path}")
+        return 0
+    
+    # Initialize counters
+    faces_detected = 0
+    faces_saved = 0
+    
+    # Detect faces
+    results = face_model(frame, conf=face_confidence)
+    
+    # Process each detected face
+    if len(results) > 0 and hasattr(results[0], 'boxes') and len(results[0].boxes) > 0:
+        for j, box in enumerate(results[0].boxes):
+            faces_detected += 1
+            
+            # Get bounding box coordinates
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            conf = float(box.conf[0])
+            
+            # Skip if below confidence threshold
+            if conf < face_confidence:
+                continue
+            
+            # Add padding around face
+            face_width = x2 - x1
+            face_height = y2 - y1
+            pad_x = int(face_width * face_padding)
+            pad_y = int(face_height * face_padding)
+            
+            # Ensure coordinates are within frame boundaries
+            x1 = max(0, x1 - pad_x)
+            y1 = max(0, y1 - pad_y)
+            x2 = min(frame.shape[1], x2 + pad_x)
+            y2 = min(frame.shape[0], y2 + pad_y)
+            
+            # Crop face
+            face = frame[y1:y2, x1:x2]
+            
+            # Skip if face crop is empty
+            if face.size == 0 or face.shape[0] == 0 or face.shape[1] == 0:
+                continue
+            
+            # Preprocess face for LightCNN
+            processed_face = preprocess_face_for_lightcnn(face)
+            
+            # Create unique filename
+            timestamp = int(time.time() * 1000)
+            filename = f"{image_name}_face{j}_{timestamp}.jpg"
+            filepath = os.path.join(output_dir, filename)
+            
+            # Save processed face
+            cv2.imwrite(filepath, processed_face)
+            faces_saved += 1
+    
+    print(f"Image: {image_path} - Found {faces_detected} faces, saved {faces_saved}")
+    return faces_saved
+
 def process_videos_in_directory(video_dir, output_base_dir, 
                               face_model_path="yolo/weights/yolo11n-face.pt",
                               sample_rate=10, frames_per_sample=3,
@@ -205,10 +292,102 @@ def process_videos_in_directory(video_dir, output_base_dir,
     
     print(f"Processed {len(video_files)} videos, extracted {total_faces} faces total")
 
+def process_images_in_directory(image_dir, output_base_dir, 
+                              face_model_path="yolo/weights/yolo11n-face.pt",
+                              face_confidence=0.5, face_padding=0.2):
+    """
+    Process all images in a directory
+    """
+    # Get all image files
+    image_files = []
+    for file in os.listdir(image_dir):
+        if file.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.tiff')):
+            image_files.append(os.path.join(image_dir, file))
+    
+    if not image_files:
+        print(f"No image files found in {image_dir}")
+        return
+    
+    print(f"Found {len(image_files)} image files")
+    
+    # Load model once for all images
+    print(f"Loading YOLO face detection model from {face_model_path}")
+    face_model = YOLO(face_model_path)
+    
+    # Process each image
+    total_faces = 0
+    for image_path in tqdm(image_files, desc="Processing images"):
+        # Read image
+        frame = cv2.imread(image_path)
+        if frame is None:
+            print(f"Error: Could not read image {image_path}")
+            continue
+            
+        # Get image name without extension
+        image_name = os.path.splitext(os.path.basename(image_path))[0]
+        output_dir = os.path.join(output_base_dir, "images")
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Detect faces
+        results = face_model(frame, conf=face_confidence)
+        
+        # Process each detected face
+        faces_detected = 0
+        faces_saved = 0
+        
+        if len(results) > 0 and hasattr(results[0], 'boxes') and len(results[0].boxes) > 0:
+            for j, box in enumerate(results[0].boxes):
+                faces_detected += 1
+                
+                # Get bounding box coordinates
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                conf = float(box.conf[0])
+                
+                # Skip if below confidence threshold
+                if conf < face_confidence:
+                    continue
+                
+                # Add padding around face
+                face_width = x2 - x1
+                face_height = y2 - y1
+                pad_x = int(face_width * face_padding)
+                pad_y = int(face_height * face_padding)
+                
+                # Ensure coordinates are within frame boundaries
+                x1 = max(0, x1 - pad_x)
+                y1 = max(0, y1 - pad_y)
+                x2 = min(frame.shape[1], x2 + pad_x)
+                y2 = min(frame.shape[0], y2 + pad_y)
+                
+                # Crop face
+                face = frame[y1:y2, x1:x2]
+                
+                # Skip if face crop is empty
+                if face.size == 0 or face.shape[0] == 0 or face.shape[1] == 0:
+                    continue
+                
+                # Preprocess face for LightCNN
+                processed_face = preprocess_face_for_lightcnn(face)
+                
+                # Create unique filename
+                timestamp = int(time.time() * 1000)
+                filename = f"{image_name}_face{j}_{timestamp}.jpg"
+                filepath = os.path.join(output_dir, filename)
+                
+                # Save processed face
+                cv2.imwrite(filepath, processed_face)
+                faces_saved += 1
+        
+        total_faces += faces_saved
+    
+    print(f"Processed {len(image_files)} images, extracted {total_faces} faces total")
+    return total_faces
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Extract and preprocess faces from videos")
+    parser = argparse.ArgumentParser(description="Extract and preprocess faces from videos and images")
     parser.add_argument("--video", help="Path to a single video file")
     parser.add_argument("--video_dir", help="Directory containing multiple video files")
+    parser.add_argument("--image_dir", help="Directory containing image files for face extraction")
     parser.add_argument("--output", default="processed_faces", 
                         help="Base output directory for processed faces")
     parser.add_argument("--yolo", default="yolo/weights/yolo11n-face.pt", 
@@ -247,5 +426,13 @@ if __name__ == "__main__":
             args.face_conf, 
             args.face_padding
         )
+    elif args.image_dir:
+        process_images_in_directory(
+            args.image_dir,
+            args.output,
+            args.yolo,
+            args.face_conf,
+            args.face_padding
+        )
     else:
-        print("Please provide either --video or --video_dir argument")
+        print("Please provide either --video, --video_dir, or --image_dir argument")
